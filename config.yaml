@@ -1,7 +1,7 @@
-name: "Batmon"
-description: "Monitor various BMS over bluetooth"
+name: "BatmonPWE"
+description: "Monitor various BMS over bluetooth - PWE fork"
 version: "0.0.46"
-slug: "batmon"
+slug: "batmonPWE"
 init: false
 arch:
   - aarch64
