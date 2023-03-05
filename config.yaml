@@ -1,14 +1,7 @@
-<<<<<<< HEAD
 name: "BatmonPWE"
 description: "Monitor various BMS over bluetooth - PWE fork"
-version: "0.0.46"
+version: "0.0.52"
 slug: "batmonpwe"
-=======
-name: "Batmon"
-description: "Monitor various BMS over bluetooth"
-version: "0.0.52p"
-slug: "batmon"
->>>>>>> 3008711836c6c15b31d163c18d84b893822aa31d
 init: false
 arch:
   - aarch64
