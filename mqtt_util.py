@@ -1,9 +1,10 @@
 import json
-import math
 import queue
+import string
 import time
 import traceback
 
+import math
 import paho.mqtt.client as paho
 
 from bmslib.bms import BmsSample, DeviceInfo, MIN_VALUE_EXPIRY
@@ -12,6 +13,7 @@ from bmslib.util import get_logger
 
 logger = get_logger()
 
+no_publish_fail_warn = False
 
 def round_to_n(x, n):
     if isinstance(x, str) or not math.isfinite(x) or not x:
@@ -25,6 +27,10 @@ def round_to_n(x, n):
     except ValueError as e:
         print('error', x, n, e)
         raise e
+
+def disable_warnings():
+    global no_publish_fail_warn
+    no_publish_fail_warn = True
 
 
 def remove_none_values(fields: dict):
@@ -104,7 +110,8 @@ def mqtt_single_out(client: paho.Client, topic, data, retain=False):
 
     mqi: paho.MQTTMessageInfo = client.publish(topic, data, retain=retain)
     if mqi.rc != paho.MQTT_ERR_SUCCESS:
-        logger.warning('mqtt publish %s failed: %s %s', topic, mqi.rc, mqi)
+        if not no_publish_fail_warn:
+            logger.warning('mqtt publish %s failed: %s %s', topic, mqi.rc, mqi)
         return False
 
     now = time.time()
@@ -186,8 +193,9 @@ def publish_cell_voltages(client, device_topic, voltages):
     # "lowest_cell": parts[3],
 
     x = range(len(voltages))
-    high_i = max(x, key=lambda i: voltages[i])
-    low_i = min(x, key=lambda i: voltages[i])
+    if x:
+        high_i = max(x, key=lambda i: voltages[i])
+        low_i = min(x, key=lambda i: voltages[i])
 
     for i in range(0, len(voltages)):
         topic = f"{device_topic}/cell_voltages/{i + 1}"
@@ -208,16 +216,16 @@ def publish_hass_discovery(client, device_topic, expire_after_seconds: int, samp
     device_json = {
         "identifiers": [(device_info and device_info.sn) or device_topic],
         # "manufacturer": device_topic,  # Daly
-        "name": (device_info and device_info.name) or device_topic,
+        "name": f"{device_info.name} ({device_topic})" if (device_info and device_info.name) else device_topic,
         "model": (device_info and device_info.model) or None,
         "sw_version": (device_info and device_info.sw_version) or None,
         "hw_version": (device_info and device_info.hw_version) or None,
     }
 
-    def _hass_discovery(k, device_class, unit, icon=None):
+    def _hass_discovery(k, device_class, unit, icon=None, name=None):
         dm = {
             "unique_id": f"{device_topic}__{k.replace('/', '_')}",
-            "name": f"{device_topic} {k.replace('/', ' ')}",
+            "name": f"{device_topic} {name or k.replace('/', ' ')}",
             "device_class": device_class or None,
             "unit_of_measurement": unit,
             "json_attributes_topic": f"{device_topic}/{k}",
@@ -233,7 +241,7 @@ def publish_hass_discovery(client, device_topic, expire_after_seconds: int, samp
 
     for k, d in sample_desc.items():
         if not is_none_or_nan(getattr(sample, d["field"])):
-            _hass_discovery(k, d["class"], unit=d["unit_of_measurement"], icon=d.get('icon', None))
+            _hass_discovery(k, d["class"], unit=d["unit_of_measurement"], icon=d.get('icon', None), name=d["field"])
 
     for i in range(0, num_cells):
         k = 'cell_voltages/%d' % (i + 1)
@@ -243,13 +251,22 @@ def publish_hass_discovery(client, device_topic, expire_after_seconds: int, samp
         k = 'temperatures/%d' % (i + 1)
         _hass_discovery(k, "temperature", unit="°C")
 
+    meters = {'total_energy': dict(device_class="energy", unit="kWh", icon="meter-electric"),
+              'total_energy_charge': dict(device_class="energy", unit="kWh", icon="meter-electric"),
+              'total_energy_discharge': dict(device_class="energy", unit="kWh", icon="meter-electric"),
+              'total_charge': dict(device_class=None, unit="Ah"),
+              'total_cycles': dict(device_class=None, unit="N", icon="battery-sync"),
+              }
+    for name, m in meters.items():
+        _hass_discovery('meter/%s' % name, **m, name=name.replace('_', ' ') + " meter")
+
     switches = (sample.switches and sample.switches.keys())
     if switches:
         for switch_name in switches:
             discovery_msg[f"homeassistant/switch/{device_topic}/{switch_name}/config"] = {
                 "unique_id": f"{device_topic}__switch_{switch_name}",
                 "name": f"{device_topic} {switch_name}",
-                "device_class": 'plug',
+                "device_class": 'outlet',
                 "json_attributes_topic": f"{device_topic}/{switch_name}",
                 "state_topic": f"{device_topic}/switch/{switch_name}",
                 "expire_after": expire_after_seconds,
@@ -260,7 +277,7 @@ def publish_hass_discovery(client, device_topic, expire_after_seconds: int, samp
             discovery_msg[f"homeassistant/binary_sensor/{device_topic}/{switch_name}/config"] = {
                 "unique_id": f"{device_topic}__switch_{switch_name}",
                 "name": f"{device_topic} {switch_name} switch",
-                "device_class": 'plug',
+                "device_class": 'power',
                 "json_attributes_topic": f"{device_topic}/{switch_name}",
                 "expire_after": expire_after_seconds,
                 "device": device_json,
@@ -309,8 +326,24 @@ def mqtt_message_handler(client, userdata, message: paho.MQTTMessage):
     else:
         logger.warning("No callback for topic %s (payload %s)", message.topic, payload)
 
+
+def paho_monkey_patch():
+    def _handle_pingresp(self):
+        if self._in_packet['remaining_length'] != 0:
+            return paho.MQTT_ERR_PROTOCOL
+
+        # No longer waiting for a PINGRESP.
+        # self._ping_t = 0
+        self._easy_log(paho.MQTT_LOG_DEBUG, "Received PINGRESP (patched)")
+        return paho.MQTT_ERR_SUCCESS
+
+    paho.Client._handle_pingresp = _handle_pingresp
+
+    logger.debug("applied paho monkey patch _handle_pingresp")
+
     """
     
+
 
 mqtt: homeassistant/sensor/daly_bms/_status_temperature_sensors/config {"unique_id": "daly_bms__status_temperature_sensors", "name": "Daly BMS  status temperature_sensors", "json_attributes_topic": "daly_bms/status/temperature_sensors", "state_topic": "daly_bms/status/temperature_sensors", "device": {"identifiers": ["daly_bms"], "manufacturer": "Daly", "model": "Currently not available", "name": "Daly BMS", "sw_version": "Currently not available"}}
 mqtt: daly_bms/status/temperature_sensors 1
