@@ -37,10 +37,13 @@ Create `options.json` within the `batmon-ha` directory. Use this as an example a
   "mqtt_user": "pv",
   "mqtt_password": "Offgrid",
   "concurrent_sampling": false,
-  "keep_alive": false,
-  "verbose_log": false,
+  "keep_alive": true,
   "sample_period": 1.0,
+  "publish_period": 1.0,
   "invert_current": false
+  "expire_values_after": 20,
+  "verbose_log": false,
+  "watchdog": false
 }
 ```
 
@@ -71,3 +74,7 @@ Place this file to `/etc/systemd/system/batmon.service` and enable to start on b
 systemctl enable batmon.service
 systemctl start batmon.service 
 ```
+
+
+# Docker
+Small modifications are needed to run this inside Docker, see https://github.com/fl4p/batmon-ha/issues/25#issuecomment-1400900525

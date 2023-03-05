@@ -1,7 +1,14 @@
+<<<<<<< HEAD
 name: "BatmonPWE"
 description: "Monitor various BMS over bluetooth - PWE fork"
 version: "0.0.46"
 slug: "batmonpwe"
+=======
+name: "Batmon"
+description: "Monitor various BMS over bluetooth"
+version: "0.0.52p"
+slug: "batmon"
+>>>>>>> 3008711836c6c15b31d163c18d84b893822aa31d
 init: false
 arch:
   - aarch64
@@ -24,8 +31,10 @@ options:
   keep_alive: true
   verbose_log: false
   sample_period: 1.0
+  publish_period: 2.0
   invert_current: true
   watchdog: true
+  expire_values_after: 20
 schema:
   devices:
     - address: str
@@ -40,5 +49,7 @@ schema:
   keep_alive: "bool"
   verbose_log: "bool"
   sample_period: "float"
+  publish_period: "float?"
   invert_current: "bool"
   watchdog: "bool"
+  expire_values_after: "float"

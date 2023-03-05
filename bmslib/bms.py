@@ -23,7 +23,7 @@ class DeviceInfo():
 
 
 class BmsSample:
-    def __init__(self, voltage, current,
+    def __init__(self, voltage, current, power=math.nan,
                  charge=math.nan, capacity=math.nan, cycle_capacity=math.nan,
                  num_cycles=math.nan, soc=math.nan,
                  balance_current=math.nan,
@@ -45,13 +45,14 @@ class BmsSample:
         :param uptime BMS uptime in seconds
         """
         self.voltage: float = voltage
-        self.current: float = current
+        self.current: float = current or 0 # -
+        self._power = power# 0 -> +0
         self.balance_current = balance_current
 
-        if math.isnan(soc):
+        # infer soc from capacity if soc is nan or type(soc)==int (for higher precision)
+        if capacity > 0 and (math.isnan(soc) or (isinstance(soc, int) and charge > 0)):
             soc = round(charge / capacity * 100, 2)
-        else:
-            if math.isnan(capacity) and soc > .2:
+        elif math.isnan(capacity) and soc > .2:
                 capacity = round(charge / soc * 100)
 
         assert math.isfinite(soc)
@@ -71,7 +72,10 @@ class BmsSample:
 
     @property
     def power(self):
-        return round(self.voltage * self.current, 2)
+        """
+        :return: Power (P=U*I) in W
+        """
+        return (self.voltage * self.current) if math.isnan(self._power) else self._power
 
     def __str__(self):
         # noinspection PyStringFormat

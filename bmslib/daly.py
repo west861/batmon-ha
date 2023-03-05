@@ -2,13 +2,13 @@
 
 References
 https://github.com/dreadnought/python-daly-bms/blob/main/dalybms/daly_bms.py
+https://github.com/esphome/esphome/tree/dev/esphome/components/daly_bms
 
 """
 import asyncio
 import struct
 from typing import Dict
 
-from bmslib import FuturesPool
 from .bms import BmsSample
 from .bt import BtBms
 
@@ -24,10 +24,10 @@ class DalyBt(BtBms):
         super().__init__(address, **kwargs)
         self.UUID_RX = None
         self.UUID_TX = None
-        self._fetch_futures = FuturesPool()
         self._fetch_nr: Dict[int, list] = {}
         # self._num_cells = 0
         self._states = None
+        self._last_response = None
 
     async def get_states_cached(self, key):
         if not self._states:
@@ -61,6 +61,7 @@ class DalyBt(BtBms):
                     # this happens if buf is already full and still receiving messages
                     continue
 
+            self._last_response = response_bytes
             self._fetch_futures.set_result(command, response_bytes)
 
     async def connect(self, **kwargs):
@@ -90,7 +91,6 @@ class DalyBt(BtBms):
     async def disconnect(self):
         if self.UUID_RX:
             await self.client.stop_notify(self.UUID_RX)
-        self._fetch_futures.clear()
         await super().disconnect()
 
     async def _q(self, command: int, num_responses: int = 1):
@@ -119,13 +119,13 @@ class DalyBt(BtBms):
         await self.client.write_gatt_char(self.UUID_TX, msg)
 
     async def fetch(self) -> BmsSample:
-        status = await self.fetch_status()
+        status = await self._fetch_status()
         sample = await self.fetch_soc(sample_kwargs=dict(
             charge=status['capacity_ah'],
             switches=dict(
                 charge=bool(status['charging_mosfet']),
                 discharge=bool(status['discharging_mosfet'])
-            )
+            ),
         ))
         return sample
 
@@ -140,11 +140,12 @@ class DalyBt(BtBms):
             voltage=parts[0] / 10,
             current=(parts[2] - 30000) / 10,  # negative=charging, positive=discharging
             soc=parts[3] / 10,
+            num_cycles=await self.get_states_cached('num_cycles'),
             **sample_kwargs,
         )
         return sample
 
-    async def fetch_status(self):
+    async def _fetch_status(self):
         response_data = await self._q(0x93)
 
         parts = struct.unpack('>b ? ? B l', response_data)
@@ -236,6 +237,9 @@ class DalyBt(BtBms):
         message_bytes += calc_crc(message_bytes)
 
         return message_bytes
+
+    def debug_data(self):
+        return self._last_response
 
 
 async def main():

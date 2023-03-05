@@ -6,7 +6,9 @@ NameType = Union[str, int, Tuple[Union[str, int]]]
 
 
 class FuturesPool:
-
+    """
+    Manage a collection of named futures.
+    """
     def __init__(self):
         self._futures: Dict[str, asyncio.Future] = {}
 
@@ -21,7 +23,7 @@ class FuturesPool:
         return FutureContext(name, pool=self)
 
     def set_result(self, name, value):
-        fut = self._futures.pop(name, None)
+        fut = self._futures.get(name, None)
         if fut:
             fut.set_result(value)
 
@@ -41,10 +43,11 @@ class FuturesPool:
             return await asyncio.gather(*tasks, return_exceptions=False)
 
         try:
-            return await asyncio.wait_for(self._futures[name], timeout)
+            return await asyncio.wait_for(self._futures.get(name), timeout)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            self.remove(name)
             raise
+        finally:
+            self.remove(name)
 
 
 class FutureContext:

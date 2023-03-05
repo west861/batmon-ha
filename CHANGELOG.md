@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.0.52] - 2023-03-01
+
+### Added
+
+- Add support for JK 11.x firmware
+- Add dummy JBD device for testing
+
+### Changed
+
+- Fix JBD unsigned values (negative capacity)
+
+## [0.0.51] - 2023-02-25
+
+### Added
+
+- Add dummy JK device for testing
+- Add Daly num_cycles
+
+### Changed
+
+- Fix debug log on error
+- Fix BLE discovery with empty device names
+- Fix JK soc issue (now using SoC the BMS provides instead of computing it)
+
+
+## [0.0.50] - 2023-02-03
+
+### Added
+
+- Option `expire_values_after`
+- Option `publish_period`
+- Log BMS debug data on failure
+- Energy meters using trapezoidal power integrators
+
+### Changed
+
+- Serially install apk packages for error tracking
+- Switch states have now class `power`
+- fix `float division by zero` 
+- Dummy BMS now reports AC current
+- Fix spinning loop in `background_loop` causing high CPU usage
+
 ## [0.0.46] - 2022-11-04
 
 ### Added

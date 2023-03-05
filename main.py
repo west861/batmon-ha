@@ -1,4 +1,3 @@
-import asyncio
 import atexit
 import json
 import random
@@ -8,14 +7,17 @@ import traceback
 from functools import partial
 from typing import List
 
+import asyncio
 import paho.mqtt.client as paho
 from bleak import BleakScanner
 
 import bmslib.bt
 import bmslib.daly
+import bmslib.dummy
 import bmslib.jbd
 import bmslib.jikong
-import bmslib.dummy
+import bmslib.victron
+import mqtt_util
 from bmslib.bms import MIN_VALUE_EXPIRY
 from bmslib.sampling import BmsSampler
 from bmslib.util import dotdict, get_logger
@@ -82,7 +84,7 @@ async def fetch_loop(fn, period, max_errors):
             num_errors_row = 0
         except Exception as e:
             num_errors_row += 1
-            logger.error('Error (num %d) reading BMS: %s', num_errors_row, e)
+            logger.error('Error (num %d, max %d) reading BMS: %s', num_errors_row, max_errors, e)
             logger.error('Stack: %s', traceback.format_exc())
             if max_errors and num_errors_row > max_errors:
                 logger.warning('too many errors, abort')
@@ -90,10 +92,17 @@ async def fetch_loop(fn, period, max_errors):
         await asyncio.sleep(period)
 
 
-async def background_loop(timeout: float):
+def store_states(samplers: List[BmsSampler]):
+    meter_states = {s.bms.name: s.get_meter_state() for s in samplers}
+    from bmslib.store import store_meter_states
+    store_meter_states(meter_states)
+
+
+async def background_loop(timeout: float, sampler_list: List[BmsSampler]):
     global shutdown
 
     t_start = time.time()
+    t_last_store = t_start
 
     if timeout:
         logger.info("mqtt watchdog loop started with timeout %.1fs", timeout)
@@ -101,10 +110,11 @@ async def background_loop(timeout: float):
     while not shutdown:
 
         await mqtt_process_action_queue()
+        now = time.time()
 
         if timeout:
             # compute time since last successful publish
-            pdt = time.time() - (mqqt_last_publish_time() or t_start)
+            pdt = now - (mqqt_last_publish_time() or t_start)
             if pdt > timeout:
                 if mqqt_last_publish_time():
                     logger.error("MQTT message publish timeout (last %.0fs ago), exit", pdt)
@@ -112,7 +122,15 @@ async def background_loop(timeout: float):
                     logger.error("MQTT never published a message after %.0fs, exit", timeout)
                 shutdown = True
                 break
-            await asyncio.sleep(.1)
+
+        if now - t_last_store > 10:
+            t_last_store = now
+            try:
+                store_states(sampler_list)
+            except Exception as e:
+                logger.error('Error starting states: %s', e)
+
+        await asyncio.sleep(.1)
 
 
 async def main():
@@ -120,13 +138,14 @@ async def main():
     extra_tasks = []
 
     try:
+        # raise Exception()
         devices = await bt_discovery()
     except Exception as e:
         devices = []
         logger.error('Error discovering devices: %s', e)
 
     def name2addr(name: str):
-        return next((d.address for d in devices if d.name.strip() == name.strip()), name)
+        return next((d.address for d in devices if (d.name or "").strip() == name.strip()), name)
 
     def dev_by_addr(address: str):
         return next((d for d in devices if d.address == address), None)
@@ -139,12 +158,9 @@ async def main():
         daly=bmslib.daly.DalyBt,
         jbd=bmslib.jbd.JbdBt,
         jk=bmslib.jikong.JKBt,
+        victron=bmslib.victron.SmartShuntBt,
         dummy=bmslib.dummy.DummyBt,
     )
-
-    async def _fetch_victron(dev):
-        result = await victron.fetch_device(dev['address'], psk=dev.get('pin'))
-        mqtt_iterator_victron(mqtt_client, result=result, topic=dev['alias'], hass=True)
 
     names = set()
 
@@ -160,22 +176,14 @@ async def main():
                 assert name not in names, "duplicate name %s" % name
                 bms_list.append(bms_class(addr, name=name, verbose_log=verbose_log or dev.get('debug')))
                 names.add(name)
-            elif dev['type'] == 'victron':
-                import victron
-                if dev.get('pin'):
-                    try:
-                        r = await victron.fetch_device(user_config.get('victron_address'), psk=dev.get('pin'))
-                        logger.info("Victron: %s", r)
-                        r = await victron.fetch_device(user_config.get('victron_address'))
-                        logger.info("Victron2: %s", r)
-                    except Exception as e:
-                        logger.error('Error pairing victron device: %s', e)
-                extra_tasks.append(partial(_fetch_victron, dev))
+            else:
+                logger.warning('Unknown device type %s', dev)
 
     for bms in bms_list:
         bms.set_keep_alive(user_config.get('keep_alive', False))
 
     logger.info('connecting mqtt %s@%s', user_config.mqtt_user, user_config.mqtt_broker)
+    # paho_monkey_patch()
     mqtt_client = paho.Client()
     mqtt_client.enable_logger(logger)
     if user_config.get('mqtt_user', None):
@@ -189,12 +197,28 @@ async def main():
     except Exception as ex:
         logger.error('mqtt connection error %s', ex)
 
+    if not user_config.mqtt_broker:
+        mqtt_util.disable_warnings()
+
+    from bmslib.store import load_meter_states
+    try:
+        meter_states = load_meter_states()
+    except Exception as e:
+        logger.warning('Failed to load meter states: %s', e)
+        meter_states = {}
+
     sample_period = float(user_config.get('sample_period', 1.0))
+    publish_period = float(user_config.get('publish_period', sample_period))
+    expire_values_after = float(user_config.get('expire_values_after', MIN_VALUE_EXPIRY))
     ic = user_config.get('invert_current', False)
-    sampler_list = [BmsSampler(bms, mqtt_client=mqtt_client,
-                               dt_max=4,
-                               expire_after_seconds=max(MIN_VALUE_EXPIRY, int(sample_period * 2 + .5)),
-                               invert_current=ic) for bms in bms_list]
+    sampler_list = [BmsSampler(
+        bms, mqtt_client=mqtt_client,
+        dt_max_seconds=max(4, sample_period * 2),
+        expire_after_seconds=max(expire_values_after, int(sample_period * 2 + .5), int(publish_period * 2 + .5)),
+        invert_current=ic,
+        meter_state=meter_states.get(bms.name),
+        publish_period=publish_period,
+    ) for bms in bms_list]
 
     parallel_fetch = user_config.get('concurrent_sampling', False)
 
@@ -204,7 +228,10 @@ async def main():
     watchdog_en = user_config.get('watchdog', False)
     max_errors = 200 if watchdog_en else 0
 
-    asyncio.create_task(background_loop(timeout=max(120., sample_period * 3) if watchdog_en else 0))
+    asyncio.create_task(background_loop(
+        timeout=max(120., sample_period * 3) if watchdog_en else 0,
+        sampler_list=sampler_list
+    ))
 
     if parallel_fetch:
         # parallel_fetch now uses a loop for each BMS so they don't delay each other
@@ -242,12 +269,11 @@ async def main():
 
         await fetch_loop(fn, period=sample_period, max_errors=max_errors)
 
-
     global shutdown
+    logger.info('All fetch loops ended. shutdown is already %s', shutdown)
     shutdown = True
 
-    logger.info('Shutting down ...')
-    # await asyncio.sleep(4)
+    store_states(sampler_list)
 
     for bms in bms_list:
         try:
@@ -260,7 +286,7 @@ async def main():
 
 def on_exit(*args, **kwargs):
     global shutdown
-    logger.info('exit signal handler...')
+    logger.info('exit signal handler... %s, %s, shutdown already %s', args, kwargs, shutdown)
     shutdown = True
 
 
