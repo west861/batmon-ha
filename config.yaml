@@ -1,6 +1,6 @@
 name: "BatmonPWE"
 description: "Monitor various BMS over bluetooth - PWE fork"
-version: "0.0.52"
+version: "0.0.52mq"
 slug: "batmonpwe"
 init: false
 arch:
